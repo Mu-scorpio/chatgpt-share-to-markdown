@@ -2,11 +2,10 @@ import { Notice, Plugin, requestUrl } from "obsidian";
 import { parseSharedPage } from "./parser";
 import { convertToMarkdown } from "./converter";
 
-const CHATGPT_SHARE_REGEX = /https?:\/\/chatgpt\.com\/s\/([a-zA-Z0-9_-]+)/;
+const CHATGPT_SHARE_REGEX = /https?:\/\/chatgpt\.com\/(?:s|share)\/([a-zA-Z0-9_-]+)/;
 
 export default class ChatGPTShareToMarkdown extends Plugin {
 	async onload() {
-		// Add ribbon icon that opens URL input modal
 		this.addRibbonIcon("download", "ChatGPT Share Importer", () => {
 			this.importWithUrlInput();
 		});
@@ -78,19 +77,28 @@ export default class ChatGPTShareToMarkdown extends Plugin {
 			const html = response.text;
 			const data = parseSharedPage(html);
 
-			if (!data || !data.postWithProfile) {
+			if (!data) {
+				new Notice("Failed to parse conversation data");
+				return;
+			}
+
+			if (data.serverResponse?.error) {
+				new Notice(`Error: ${data.serverResponse.error}`);
+				return;
+			}
+
+			if (!data.postWithProfile && !data.serverResponse?.data) {
 				new Notice("Failed to parse conversation data");
 				return;
 			}
 
 			const markdown = convertToMarkdown(data);
-			const title = data.postWithProfile.post?.text || postId;
+			const title = data.serverResponse?.data?.title || data.postWithProfile?.post?.text || postId;
 			const filename = sanitizeFilename(title) + ".md";
 
 			const vault = this.app.vault;
 			const filePath = filename;
 
-			// Check if file already exists
 			const existingFile = vault.getAbstractFileByPath(filePath);
 			if (existingFile) {
 				new Notice(`File "${filename}" already exists`);
@@ -100,7 +108,6 @@ export default class ChatGPTShareToMarkdown extends Plugin {
 			await vault.create(filePath, markdown);
 			new Notice(`Saved as "${filename}"`);
 
-			// Open the file
 			const file = vault.getAbstractFileByPath(filePath);
 			if (file) {
 				await this.app.workspace.openLinkText(filePath, "", false);
@@ -120,7 +127,6 @@ function sanitizeFilename(name: string): string {
 		.substring(0, 200);
 }
 
-// Simple URL input modal
 import { App, Modal } from "obsidian";
 
 class UrlInputModal extends Modal {
@@ -138,7 +144,7 @@ class UrlInputModal extends Modal {
 
 		const inputEl = contentEl.createEl("input", {
 			type: "text",
-			placeholder: "https://chatgpt.com/s/...",
+			placeholder: "https://chatgpt.com/share/...",
 			cls: "chatgpt-url-input",
 		});
 		inputEl.style.width = "100%";
