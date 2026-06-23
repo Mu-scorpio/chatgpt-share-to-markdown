@@ -1,9 +1,5 @@
 import { ChatGPTLoaderData } from "./types";
 
-/**
- * Extract the serialized data string from ChatGPT shared page HTML.
- * The data is in streamController.enqueue("...") calls with escaped quotes.
- */
 function extractEnqueueData(html: string): string | null {
 	const marker = 'streamController.enqueue("';
 	const chunks: string[] = [];
@@ -14,12 +10,10 @@ function extractEnqueueData(html: string): string | null {
 		if (idx < 0) break;
 
 		const dataStart = idx + marker.length;
-
-		// Find the closing ") - scan for unescaped quote followed by )
 		let pos = dataStart;
 		while (pos < html.length) {
 			if (html[pos] === "\\") {
-				pos += 2; // skip escaped character
+				pos += 2;
 				continue;
 			}
 			if (html[pos] === '"') {
@@ -36,21 +30,15 @@ function extractEnqueueData(html: string): string | null {
 
 	if (chunks.length === 0) return null;
 
-	// Join all chunks and unescape JavaScript string escapes
-	// Order matters: unescape \\" first (becomes "), then \\\\ (becomes \)
 	return chunks.join("")
 		.replace(/\\"/g, '"')
 		.replace(/\\\\/g, "\\");
 }
 
-/**
- * Extract and parse the React Router serialized data from ChatGPT shared page HTML.
- */
 function extractSerializedData(html: string): unknown[] | null {
 	const combined = extractEnqueueData(html);
 	if (!combined) return null;
 
-	// Find the correct end of the JSON array by tracking bracket depth
 	let depth = 0;
 	let end = 0;
 	for (let i = 0; i < combined.length; i++) {
@@ -73,12 +61,6 @@ function extractSerializedData(html: string): unknown[] | null {
 	}
 }
 
-/**
- * Recursively resolve the Turbopack serialized references.
- * Objects use _N keys where N is an index into the data array for the key name.
- * Integer values that are valid indices are also resolved to their data array values.
- * Negative integers (-5, -7) are special values representing null.
- */
 function resolveValue(data: unknown[], val: unknown, depth = 0): unknown {
 	if (depth > 50) return "<max depth>";
 	if (val === null || val === undefined) return val;
@@ -86,9 +68,7 @@ function resolveValue(data: unknown[], val: unknown, depth = 0): unknown {
 	if (typeof val === "string") return val;
 
 	if (typeof val === "number") {
-		// Negative numbers are special values (null-like)
 		if (val < 0) return null;
-		// Positive numbers that are valid indices should be resolved
 		if (val < data.length) {
 			return resolveValue(data, data[val], depth + 1);
 		}
@@ -121,21 +101,27 @@ function resolveValue(data: unknown[], val: unknown, depth = 0): unknown {
 	return val;
 }
 
-/**
- * Parse the HTML of a ChatGPT shared page and extract the loader data.
- */
 export function parseSharedPage(html: string): ChatGPTLoaderData | null {
 	const data = extractSerializedData(html);
 	if (!data) return null;
 
-	// Find the route data for "routes/s.$postId"
-	const routeIdx = data.indexOf("routes/s.$postId");
-	if (routeIdx < 0) return null;
+	const routeIdx = data.indexOf("routes/share.$shareId.($action)");
+	if (routeIdx >= 0) {
+		const routeRef = data[routeIdx + 1];
+		if (routeRef && typeof routeRef === "object") {
+			const resolved = resolveValue(data, routeRef) as Record<string, unknown>;
+			return resolved as unknown as ChatGPTLoaderData;
+		}
+	}
 
-	const routeRef = data[routeIdx + 1];
-	if (!routeRef || typeof routeRef !== "object") return null;
+	const oldRouteIdx = data.indexOf("routes/s.$postId");
+	if (oldRouteIdx >= 0) {
+		const routeRef = data[oldRouteIdx + 1];
+		if (routeRef && typeof routeRef === "object") {
+			const resolved = resolveValue(data, routeRef) as Record<string, unknown>;
+			return resolved as unknown as ChatGPTLoaderData;
+		}
+	}
 
-	// Resolve the route data
-	const resolved = resolveValue(data, routeRef) as Record<string, unknown>;
-	return resolved as unknown as ChatGPTLoaderData;
+	return null;
 }
