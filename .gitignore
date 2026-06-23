@@ -1,7 +1,17 @@
 node_modules/
+
+# Build output
+main.js
+*.map
+dist/
+
+# Local/editor files
 .DS_Store
 .claude/
+.obsidian/
+.vscode/
 
+# Archives and logs
 *.zip
 *.log
 
