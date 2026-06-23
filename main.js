@@ -117,18 +117,32 @@ function resolveValue(data, val, depth = 0) {
 function parseSharedPage(html) {
   const data = extractSerializedData(html);
   if (!data) return null;
-  const routeIdx = data.indexOf("routes/s.$postId");
-  if (routeIdx < 0) return null;
-  const routeRef = data[routeIdx + 1];
-  if (!routeRef || typeof routeRef !== "object") return null;
-  const resolved = resolveValue(data, routeRef);
-  return resolved;
+  const routeIdx = data.indexOf("routes/share.$shareId.($action)");
+  if (routeIdx >= 0) {
+    const routeRef = data[routeIdx + 1];
+    if (routeRef && typeof routeRef === "object") {
+      const resolved = resolveValue(data, routeRef);
+      return resolved;
+    }
+  }
+  const oldRouteIdx = data.indexOf("routes/s.$postId");
+  if (oldRouteIdx >= 0) {
+    const routeRef = data[oldRouteIdx + 1];
+    if (routeRef && typeof routeRef === "object") {
+      const resolved = resolveValue(data, routeRef);
+      return resolved;
+    }
+  }
+  return null;
 }
 
 // src/converter.ts
 function convertToMarkdown(data) {
-  var _a;
-  const post = (_a = data.postWithProfile) == null ? void 0 : _a.post;
+  var _a, _b;
+  if ((_a = data.serverResponse) == null ? void 0 : _a.data) {
+    return convertNewFormat(data);
+  }
+  const post = (_b = data.postWithProfile) == null ? void 0 : _b.post;
   if (!post) return "";
   const title = post.text || post.og_title || "ChatGPT Conversation";
   const lines = [];
@@ -149,6 +163,67 @@ function convertToMarkdown(data) {
     }
   }
   return lines.join("\n");
+}
+function convertNewFormat(data) {
+  var _a;
+  const conversation = data.serverResponse.data;
+  const title = conversation.title || "ChatGPT Conversation";
+  const lines = [];
+  lines.push("---");
+  lines.push(`title: "${escapeYaml(title)}"`);
+  lines.push(`source: "https://chatgpt.com/share/${data.sharedConversationId || ""}"`);
+  lines.push(`date: ${conversation.create_time ? new Date(conversation.create_time * 1e3).toISOString().split("T")[0] : ""}`);
+  lines.push("---");
+  lines.push("");
+  lines.push(`# ${title}`);
+  lines.push("");
+  const messages = extractMessagesFromMapping(conversation.mapping);
+  for (const msg of messages) {
+    const role = (_a = msg.author) == null ? void 0 : _a.role;
+    let content = extractMessageContent(msg);
+    if (!content) continue;
+    content = ensureProperLineBreaks(content);
+    if (role === "user") {
+      lines.push("## User");
+      lines.push("");
+      lines.push(content);
+      lines.push("");
+    } else if (role === "assistant") {
+      lines.push("## Assistant");
+      lines.push("");
+      lines.push(content);
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
+}
+function extractMessagesFromMapping(mapping) {
+  const messages = [];
+  const root = mapping["client-created-root"];
+  if (!root) return messages;
+  function visit(nodeId) {
+    var _a, _b;
+    const node = mapping[nodeId];
+    if (!node) return;
+    if (node.message) {
+      const role = (_a = node.message.author) == null ? void 0 : _a.role;
+      const contentType = (_b = node.message.content) == null ? void 0 : _b.content_type;
+      if ((role === "user" || role === "assistant") && (contentType === "text" || contentType === "code")) {
+        messages.push(node.message);
+      }
+    }
+    if (node.children) {
+      for (const childId of node.children) {
+        visit(childId);
+      }
+    }
+  }
+  if (root.children) {
+    for (const childId of root.children) {
+      visit(childId);
+    }
+  }
+  return messages;
 }
 function escapeYaml(str) {
   return str.replace(/"/g, '\\"');
@@ -191,27 +266,7 @@ function processMessageSlice(messages) {
   return lines.join("\n");
 }
 function processDeepResearch(messages) {
-  var _a;
-  const lines = [];
-  const conversationMessages = filterConversationMessages(messages);
-  for (const msg of conversationMessages) {
-    const role = (_a = msg.author) == null ? void 0 : _a.role;
-    let content = extractMessageContent(msg);
-    if (!content) continue;
-    content = ensureProperLineBreaks(content);
-    if (role === "user") {
-      lines.push("## User");
-      lines.push("");
-      lines.push(content);
-      lines.push("");
-    } else if (role === "assistant") {
-      lines.push("## Assistant");
-      lines.push("");
-      lines.push(content);
-      lines.push("");
-    }
-  }
-  return lines.join("\n");
+  return processMessageSlice(messages);
 }
 function processCodeBlock(content, language) {
   const lang = language || "";
@@ -255,14 +310,14 @@ function cleanCitations(text, msg) {
     }
   );
   cleaned = cleaned.replace(
-    /NciteÖ(turn\d+search\d+)Ő/g,
+    /\uFFFDcite\uFFFD(turn\d+search\d+)\uFFFD/g,
     (_match, refId) => {
       const link = citationLinks.get(refId);
       return link ? formatInlineCitationLink(link) : "";
     }
   );
   cleaned = cleaned.replace(
-    /cite(turn\d+search\d+)/g,
+    /\u3000cite\u3002(turn\d+search\d+)\u3001/g,
     (_match, refId) => {
       const link = citationLinks.get(refId);
       return link ? formatInlineCitationLink(link) : "";
@@ -343,7 +398,7 @@ function ensureProperLineBreaks(text) {
 
 // src/main.ts
 var import_obsidian2 = require("obsidian");
-var CHATGPT_SHARE_REGEX = /https?:\/\/chatgpt\.com\/s\/([a-zA-Z0-9_-]+)/;
+var CHATGPT_SHARE_REGEX = /https?:\/\/chatgpt\.com\/(?:s|share)\/([a-zA-Z0-9_-]+)/;
 var ChatGPTShareToMarkdown = class extends import_obsidian.Plugin {
   async onload() {
     this.addRibbonIcon("download", "ChatGPT Share Importer", () => {
@@ -393,7 +448,7 @@ var ChatGPTShareToMarkdown = class extends import_obsidian.Plugin {
     modal.open();
   }
   async importFromUrl(url) {
-    var _a;
+    var _a, _b, _c, _d, _e, _f;
     const match = url.match(CHATGPT_SHARE_REGEX);
     if (!match) {
       new import_obsidian.Notice("Invalid ChatGPT shared link format");
@@ -408,12 +463,20 @@ var ChatGPTShareToMarkdown = class extends import_obsidian.Plugin {
       });
       const html = response.text;
       const data = parseSharedPage(html);
-      if (!data || !data.postWithProfile) {
+      if (!data) {
+        new import_obsidian.Notice("Failed to parse conversation data");
+        return;
+      }
+      if ((_a = data.serverResponse) == null ? void 0 : _a.error) {
+        new import_obsidian.Notice(`Error: ${data.serverResponse.error}`);
+        return;
+      }
+      if (!data.postWithProfile && !((_b = data.serverResponse) == null ? void 0 : _b.data)) {
         new import_obsidian.Notice("Failed to parse conversation data");
         return;
       }
       const markdown = convertToMarkdown(data);
-      const title = ((_a = data.postWithProfile.post) == null ? void 0 : _a.text) || postId;
+      const title = ((_d = (_c = data.serverResponse) == null ? void 0 : _c.data) == null ? void 0 : _d.title) || ((_f = (_e = data.postWithProfile) == null ? void 0 : _e.post) == null ? void 0 : _f.text) || postId;
       const filename = sanitizeFilename(title) + ".md";
       const vault = this.app.vault;
       const filePath = filename;
@@ -448,7 +511,7 @@ var UrlInputModal = class extends import_obsidian2.Modal {
     contentEl.createEl("h2", { text: "Enter ChatGPT shared link" });
     const inputEl = contentEl.createEl("input", {
       type: "text",
-      placeholder: "https://chatgpt.com/s/...",
+      placeholder: "https://chatgpt.com/share/...",
       cls: "chatgpt-url-input"
     });
     inputEl.style.width = "100%";
