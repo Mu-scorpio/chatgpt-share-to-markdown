@@ -2,20 +2,21 @@ import {
 	ChatGPTAttachment,
 	ChatGPTContentReference,
 	ChatGPTLoaderData,
+	ChatGPTMappingNode,
 	ChatGPTMessage,
 } from "./types";
 
-/**
- * Convert parsed ChatGPT shared data to Markdown.
- */
 export function convertToMarkdown(data: ChatGPTLoaderData): string {
+	if (data.serverResponse?.data) {
+		return convertNewFormat(data);
+	}
+	
 	const post = data.postWithProfile?.post;
 	if (!post) return "";
 
 	const title = post.text || post.og_title || "ChatGPT Conversation";
 	const lines: string[] = [];
 
-	// Frontmatter
 	lines.push("---");
 	lines.push(`title: "${escapeYaml(title)}"`);
 	lines.push(`source: "${post.permalink || ""}"`);
@@ -25,7 +26,6 @@ export function convertToMarkdown(data: ChatGPTLoaderData): string {
 	lines.push(`# ${title}`);
 	lines.push("");
 
-	// Process each attachment
 	if (post.attachments) {
 		for (const attachment of post.attachments) {
 			const content = processAttachment(attachment, data);
@@ -36,6 +36,80 @@ export function convertToMarkdown(data: ChatGPTLoaderData): string {
 	}
 
 	return lines.join("\n");
+}
+
+function convertNewFormat(data: ChatGPTLoaderData): string {
+	const conversation = data.serverResponse!.data!;
+	const title = conversation.title || "ChatGPT Conversation";
+	const lines: string[] = [];
+
+	lines.push("---");
+	lines.push(`title: "${escapeYaml(title)}"`);
+	lines.push(`source: "https://chatgpt.com/share/${data.sharedConversationId || ""}"`);
+	lines.push(`date: ${conversation.create_time ? new Date(conversation.create_time * 1000).toISOString().split("T")[0] : ""}`);
+	lines.push("---");
+	lines.push("");
+	lines.push(`# ${title}`);
+	lines.push("");
+
+	const messages = extractMessagesFromMapping(conversation.mapping);
+	
+	for (const msg of messages) {
+		const role = msg.author?.role;
+		let content = extractMessageContent(msg);
+
+		if (!content) continue;
+
+		content = ensureProperLineBreaks(content);
+
+		if (role === "user") {
+			lines.push("## User");
+			lines.push("");
+			lines.push(content);
+			lines.push("");
+		} else if (role === "assistant") {
+			lines.push("## Assistant");
+			lines.push("");
+			lines.push(content);
+			lines.push("");
+		}
+	}
+
+	return lines.join("\n");
+}
+
+function extractMessagesFromMapping(mapping: Record<string, ChatGPTMappingNode>): ChatGPTMessage[] {
+	const messages: ChatGPTMessage[] = [];
+	
+	const root = mapping["client-created-root"];
+	if (!root) return messages;
+
+	function visit(nodeId: string) {
+		const node = mapping[nodeId];
+		if (!node) return;
+		
+		if (node.message) {
+			const role = node.message.author?.role;
+			const contentType = node.message.content?.content_type;
+			if ((role === "user" || role === "assistant") && (contentType === "text" || contentType === "code")) {
+				messages.push(node.message);
+			}
+		}
+		
+		if (node.children) {
+			for (const childId of node.children) {
+				visit(childId);
+			}
+		}
+	}
+
+	if (root.children) {
+		for (const childId of root.children) {
+			visit(childId);
+		}
+	}
+
+	return messages;
 }
 
 function escapeYaml(str: string): string {
@@ -70,7 +144,6 @@ function processMessageSlice(messages: ChatGPTMessage[]): string {
 
 		if (!content) continue;
 
-		// Ensure proper line breaks in the content
 		content = ensureProperLineBreaks(content);
 
 		if (role === "user") {
@@ -90,32 +163,7 @@ function processMessageSlice(messages: ChatGPTMessage[]): string {
 }
 
 function processDeepResearch(messages: ChatGPTMessage[]): string {
-	const lines: string[] = [];
-	const conversationMessages = filterConversationMessages(messages);
-
-	for (const msg of conversationMessages) {
-		const role = msg.author?.role;
-		let content = extractMessageContent(msg);
-
-		if (!content) continue;
-
-		// Ensure proper line breaks in the content
-		content = ensureProperLineBreaks(content);
-
-		if (role === "user") {
-			lines.push("## User");
-			lines.push("");
-			lines.push(content);
-			lines.push("");
-		} else if (role === "assistant") {
-			lines.push("## Assistant");
-			lines.push("");
-			lines.push(content);
-			lines.push("");
-		}
-	}
-
-	return lines.join("\n");
+	return processMessageSlice(messages);
 }
 
 function processCodeBlock(content: string, language?: string): string {
@@ -123,21 +171,14 @@ function processCodeBlock(content: string, language?: string): string {
 	return `\`\`\`${lang}\n${content}\n\`\`\``;
 }
 
-/**
- * Filter messages to only include user and assistant conversation messages.
- * Excludes tool calls, search results, and internal system messages.
- */
 function filterConversationMessages(messages: ChatGPTMessage[]): ChatGPTMessage[] {
 	return messages.filter((msg) => {
 		const role = msg.author?.role;
 		if (role === "user") return true;
 		if (role === "assistant") {
-			// Include assistant messages that have actual text content
-			// Exclude tool call messages (code content_type with search queries)
 			const contentType = msg.content?.content_type;
 			if (contentType === "code") {
 				const text = msg.content?.text || "";
-				// Exclude internal search query construction
 				if (text.includes("system1_search_query")) return false;
 				return true;
 			}
@@ -147,10 +188,6 @@ function filterConversationMessages(messages: ChatGPTMessage[]): ChatGPTMessage[
 	});
 }
 
-/**
- * Convert citation markers to Markdown links when ChatGPT provides source metadata.
- * Falls back to removing unresolved citation artifacts.
- */
 function cleanCitations(text: string, msg: ChatGPTMessage): string {
 	let cleaned = text;
 	const citationLinks = buildCitationLinkMap(msg.metadata?.content_references || []);
@@ -172,21 +209,20 @@ function cleanCitations(text: string, msg: ChatGPTMessage): string {
 		}
 	);
 	cleaned = cleaned.replace(
-		/NciteÖ(turn\d+search\d+)Ő/g,
+		/\uFFFDcite\uFFFD(turn\d+search\d+)\uFFFD/g,
 		(_match, refId: string) => {
 			const link = citationLinks.get(refId);
 			return link ? formatInlineCitationLink(link) : "";
 		}
 	);
 	cleaned = cleaned.replace(
-		/cite(turn\d+search\d+)/g,
+		/\u3000cite\u3002(turn\d+search\d+)\u3001/g,
 		(_match, refId: string) => {
 			const link = citationLinks.get(refId);
 			return link ? formatInlineCitationLink(link) : "";
 		}
 	);
 
-	// Collapse multiple spaces into single spaces, but keep newlines intact
 	return cleaned.replace(/[ \t]+/g, " ").trim();
 }
 
@@ -251,9 +287,6 @@ function escapeMarkdownLinkText(text: string): string {
 	return text.replace(/([\\\]])/g, "\\$1");
 }
 
-/**
- * Extract readable text content from a message.
- */
 function extractMessageContent(msg: ChatGPTMessage): string | null {
 	const content = msg.content;
 	if (!content) return null;
@@ -264,7 +297,6 @@ function extractMessageContent(msg: ChatGPTMessage): string | null {
 			const cleaned = parts
 				.filter((p) => p && p.trim())
 				.map((p) => cleanCitations(p, msg));
-			// Join parts with newlines preserved, ensuring proper markdown formatting
 			return cleaned.join("\n\n");
 		}
 		return null;
@@ -272,7 +304,6 @@ function extractMessageContent(msg: ChatGPTMessage): string | null {
 
 	if (content.content_type === "code") {
 		const text = content.text || "";
-		// Skip internal search query messages
 		if (text.includes("system1_search_query")) return null;
 		const lang = content.language || "";
 		return `\`\`\`${lang}\n${text}\n\`\`\``;
@@ -281,16 +312,8 @@ function extractMessageContent(msg: ChatGPTMessage): string | null {
 	return null;
 }
 
-/**
- * Ensure proper line breaks in markdown output.
- * ChatGPT sometimes uses single newlines that should be preserved.
- */
 function ensureProperLineBreaks(text: string): string {
-	// Replace multiple consecutive newlines with proper markdown line breaks
-	// Single newlines within paragraphs should become double newlines for markdown
 	return text
-		// Replace multiple newlines with proper spacing
 		.replace(/\n{3,}/g, "\n\n")
-		// Ensure each paragraph is separated by two newlines
 		.replace(/([^\n])\n([^\n])/g, "$1\n\n$2");
 }
