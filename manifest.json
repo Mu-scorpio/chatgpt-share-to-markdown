@@ -1,7 +1,7 @@
 {
 	"id": "chatgpt-share-to-markdown",
 	"name": "ChatGPT Share to Markdown",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"minAppVersion": "0.15.0",
 	"description": "Parse ChatGPT shared conversation links and save as Markdown files",
 	"author": "mouzhengshuai",
